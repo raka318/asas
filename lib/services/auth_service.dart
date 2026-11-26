@@ -1,186 +1,161 @@
+import 'dart:async';
 import 'dart:convert';
-
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:asas/config/api_config.dart';
+import '../constants/api_constant.dart';
+import '../models/user_model.dart';
 
-typedef JsonResponse = Map<String, dynamic>;
-
-/// Service untuk menangani autentikasi pengguna (Login, Register, Logout, Cek Token).
+/// Layanan HTTP untuk autentikasi dan manajemen token Laravel Sanctum
 class AuthService {
-  static const String _tokenKey = 'token';
-  static const String _userNameKey = 'user_name';
+  static const String _tokenKey = 'auth_token';
 
-  /// Menyimpan token dan nama user ke penyimpanan lokal perangkat.
-  Future<void> _saveSession(String token, String userName) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_tokenKey, token);
-    await prefs.setString(_userNameKey, userName);
-  }
-
-  /// Mengambil token autentikasi yang tersimpan.
+  // Mengambil token yang tersimpan di penyimpanan lokal
   Future<String?> getToken() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getString(_tokenKey);
   }
 
-  /// Mengambil nama pengguna yang sedang login.
-  Future<String> getUserName() async {
+  // Menyimpan token ke penyimpanan lokal
+  Future<void> saveToken(String token) async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_userNameKey) ?? 'Pengguna Ghibli';
+    await prefs.setString(_tokenKey, token);
   }
 
-  /// Memeriksa apakah user sudah memiliki token login.
-  Future<bool> isLoggedIn() async {
+  // Menghapus token saat logout
+  Future<void> removeToken() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_tokenKey);
+  }
+
+  // Header standar JSON lengkap dengan Bearer Token jika tersedia
+  Future<dynamic> getAuthHeaders() async {
     final token = await getToken();
-    return token != null && token.isNotEmpty;
+    return <String, String>{
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      if (token != null && token.isNotEmpty) 'Authorization': 'Bearer $token',
+    };
   }
 
-  /// Mengekstrak token dari berbagai kemungkinan struktur JSON Laravel.
-  String? _extractToken(dynamic data) {
-    if (data is! Map) return null;
-    if (data['access_token'] != null) return data['access_token'].toString();
-    if (data['token'] != null) return data['token'].toString();
-    if (data['data'] is Map) {
-      if (data['data']['access_token'] != null) {
-        return data['data']['access_token'].toString();
+  // Proses Register akun baru ke Laravel
+  Future<dynamic> register({
+    required String name,
+    required String email,
+    required String password,
+    required String passwordConfirmation,
+  }) async {
+    final url = Uri.parse(
+      '${ApiConstant.baseUrlLaravel}${ApiConstant.registerEndpoint}',
+    );
+    final response = await http.post(
+      url,
+      headers: <String, String>{
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: jsonEncode({
+        'name': name,
+        'email': email,
+        'password': password,
+        'password_confirmation': passwordConfirmation,
+      }),
+    );
+
+    final body = jsonDecode(response.body);
+    if (response.statusCode == 200 || response.statusCode == 201) {
+      // Simpan token jika API langsung mengembalikan access_token atau token
+      final token =
+          body['access_token'] ?? body['token'] ?? body['data']?['token'];
+      if (token != null) {
+        await saveToken(token);
       }
-      if (data['data']['token'] != null) {
-        return data['data']['token'].toString();
+      return <String, dynamic>{
+        'success': true,
+        'message': body['message'] ?? 'Registrasi berhasil',
+      };
+    }
+
+    return <String, dynamic>{
+      'success': false,
+      'message':
+          body['message'] ?? 'Registrasi gagal, periksa kembali data Anda',
+    };
+  }
+
+  // Proses Login user ke Laravel Sanctum
+  Future<dynamic> login({
+    required String email,
+    required String password,
+  }) async {
+    final url = Uri.parse(
+      '${ApiConstant.baseUrlLaravel}${ApiConstant.loginEndpoint}',
+    );
+    final response = await http.post(
+      url,
+      headers: <String, String>{
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: jsonEncode({
+        'email': email,
+        'password': password,
+      }),
+    );
+
+    final body = jsonDecode(response.body);
+    if (response.statusCode == 200) {
+      final token =
+          body['access_token'] ?? body['token'] ?? body['data']?['token'];
+      if (token != null) {
+        await saveToken(token);
+        return <String, dynamic>{
+          'success': true,
+          'message': 'Login berhasil',
+        };
       }
+      return <String, dynamic>{
+        'success': false,
+        'message': 'Token tidak ditemukan pada respons server',
+      };
+    }
+
+    return <String, dynamic>{
+      'success': false,
+      'message': body['message'] ?? 'Email atau password salah',
+    };
+  }
+
+  // Mengambil data user yang sedang login dari endpoint /api/user
+  Future<UserModel?> getCurrentUser() async {
+    final url = Uri.parse(
+      '${ApiConstant.baseUrlLaravel}${ApiConstant.userEndpoint}',
+    );
+    final headers = await getAuthHeaders();
+    final response = await http.get(url, headers: headers);
+
+    if (response.statusCode == 200) {
+      final body = jsonDecode(response.body);
+      final userData =
+          body is Map<String, dynamic> && body.containsKey('data')
+              ? body['data']
+              : body;
+      return UserModel.fromJson(userData);
     }
     return null;
   }
 
-  /// Mengekstrak nama user dari berbagai kemungkinan struktur JSON Laravel.
-  String _extractUserName(dynamic data, String fallback) {
-    if (data is! Map) return fallback;
-    if (data['user'] is Map && data['user']['name'] != null) {
-      return data['user']['name'].toString();
-    }
-    if (data['data'] is Map) {
-      if (data['data']['user'] is Map && data['data']['user']['name'] != null) {
-        return data['data']['user']['name'].toString();
-      }
-      if (data['data']['name'] != null) {
-        return data['data']['name'].toString();
-      }
-    }
-    return fallback;
-  }
-
-  /// Mengirim permintaan registrasi akun baru ke backend Laravel.
-  Future<JsonResponse> register({
-    required String name,
-    required String email,
-    required String password,
-  }) async {
-    try {
-      final response = await http.post(
-        Uri.parse('${ApiConfig.laravelBaseUrl}/register'),
-        headers: {
-          'Accept': 'application/json',
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode({
-          'name': name,
-          'email': email,
-          'password': password,
-          // Sertakan password_confirmation jaga-jaga jika AuthController lama pakai rule 'confirmed'
-          'password_confirmation': password,
-        }),
-      );
-
-      final data = jsonDecode(response.body);
-      final token = _extractToken(data);
-
-      if ((response.statusCode == 200 || response.statusCode == 201) &&
-          token != null &&
-          token.isNotEmpty) {
-        final userName = _extractUserName(data, name);
-        await _saveSession(token, userName);
-        return {
-          'success': true,
-          'message': data['message'] ?? 'Registrasi berhasil',
-        };
-      }
-
-      String errorMessage =
-          data['message'] ?? 'Registrasi gagal atau token tidak ditemukan';
-      if (data['errors'] != null && data['errors'] is Map) {
-        final firstErrorList = (data['errors'] as Map).values.first;
-        if (firstErrorList is List && firstErrorList.isNotEmpty) {
-          errorMessage = firstErrorList.first.toString();
-        }
-      }
-
-      return {'success': false, 'message': errorMessage};
-    } catch (e) {
-      return {
-        'success': false,
-        'message': 'Gagal terhubung ke server Laravel: $e',
-      };
-    }
-  }
-
-  /// Mengirim permintaan login ke backend Laravel dan menyimpan token.
-  Future<JsonResponse> login({
-    required String email,
-    required String password,
-  }) async {
-    try {
-      final response = await http.post(
-        Uri.parse('${ApiConfig.laravelBaseUrl}/login'),
-        headers: {
-          'Accept': 'application/json',
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode({'email': email, 'password': password}),
-      );
-
-      final data = jsonDecode(response.body);
-      final token = _extractToken(data);
-
-      if (response.statusCode == 200 && token != null && token.isNotEmpty) {
-        final userName = _extractUserName(data, 'User');
-        await _saveSession(token, userName);
-        return {
-          'success': true,
-          'message': data['message'] ?? 'Login berhasil',
-        };
-      }
-
-      return {
-        'success': false,
-        'message': data['message'] ?? 'Email atau password salah',
-      };
-    } catch (e) {
-      return {
-        'success': false,
-        'message': 'Gagal terhubung ke server Laravel: $e',
-      };
-    }
-  }
-
-  /// Menghapus token di server Laravel dan membersihkan sesi lokal.
+  // Proses Logout dari server dan hapus token lokal
   Future<void> logout() async {
     try {
-      final token = await getToken();
-      if (token != null && token.isNotEmpty) {
-        await http.post(
-          Uri.parse('${ApiConfig.laravelBaseUrl}/logout'),
-          headers: {
-            'Accept': 'application/json',
-            'Authorization': 'Bearer $token',
-          },
-        );
-      }
+      final url = Uri.parse(
+        '${ApiConstant.baseUrlLaravel}${ApiConstant.logoutEndpoint}',
+      );
+      final headers = await getAuthHeaders();
+      await http.post(url, headers: headers);
     } catch (_) {
-      // Tetap lanjutkan hapus sesi lokal meskipun server tidak merespons
+      // Abaikan error jaringan saat logout agar token lokal tetap terhapus
     } finally {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.remove(_tokenKey);
-      await prefs.remove(_userNameKey);
+      await removeToken();
     }
   }
 }
